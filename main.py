@@ -25,7 +25,7 @@ class DownloadRequest(BaseModel):
     format_id: str
     type: str = "video"  # 區分是影片還是純音樂
 
-# 👇 刪除檔案的小幫手 (必須放在最外層獨立出來)
+# 刪除檔案的小幫手 (必須放在最外層獨立出來)
 def cleanup_file(path: str):
     try:
         if os.path.exists(path):
@@ -107,11 +107,11 @@ async def get_video_info(request: InfoRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 # ==========================================
-# API 2: 正式下載影片或 MP3 (Apple MOV 終極相容版)
+# API 2: 正式下載影片或 MP3 (無轉檔卡頓 + QuickTime 支援版)
 # ==========================================
 @app.post("/api/download")
-# 👇 這裡加入 background_tasks: BackgroundTasks
 async def download_video(request: DownloadRequest, background_tasks: BackgroundTasks):
     try:
         clean_url = clean_youtube_url(request.url)
@@ -132,21 +132,26 @@ async def download_video(request: DownloadRequest, background_tasks: BackgroundT
             media_type = "audio/mpeg"
 
         else:
-            # 改為下載 Apple 最相容的 .mov 格式
             ydl_opts = {
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
-                'merge_output_format': 'mov',
+                # 關鍵防線 1：要求 yt-dlp 盡可能找含有 H.264 (avc1) 的格式
+                # 這樣就不會有 "無法被 QuickTime 播放" 的問題
+                'format': f"{request.format_id}[vcodec^=avc1]+bestaudio/best",
+
+                # 關鍵防線 2：如果真的找不到，就直接合併成 mp4，但不做任何二次轉檔
+                'merge_output_format': 'mp4',
                 'outtmpl': '%(title)s.%(ext)s',
                 'noplaylist': True,
                 'extract_flat': 'in_playlist',
                 'keepvideo': False,
+
+                # 只要求 FFmpeg 把檔案裝進 MP4 箱子裡，不要動裡面的編碼
                 'postprocessors': [{
                     'key': 'FFmpegVideoConvertor',
-                    'preferedformat': 'mov',
+                    'preferedformat': 'mp4',
                 }]
             }
-            target_ext = ".mov"
-            media_type = "video/quicktime"
+            target_ext = ".mp4"
+            media_type = "video/mp4"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=True)
@@ -162,10 +167,9 @@ async def download_video(request: DownloadRequest, background_tasks: BackgroundT
             "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
         }
 
-        # 👇 在傳送檔案前，把「刪除檔案」的任務加進背景排程
+        # 伺服器傳送完畢後，由 BackgroundTasks 負責大掃除
         background_tasks.add_task(cleanup_file, filename)
 
-        # 👇 伺服器會先把檔案傳給前端，傳完之後，自動偷偷執行上面那行刪除指令！
         return FileResponse(path=filename, media_type=media_type, headers=headers)
 
     except Exception as e:
