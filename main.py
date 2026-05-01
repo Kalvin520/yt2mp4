@@ -109,7 +109,7 @@ async def get_video_info(request: InfoRequest):
 
 
 # ==========================================
-# API 2: 正式下載影片或 MP3 (無轉檔卡頓 + QuickTime 支援版)
+# API 2: 正式下載影片或 MP3 (極速不轉檔版)
 # ==========================================
 @app.post("/api/download")
 async def download_video(request: DownloadRequest, background_tasks: BackgroundTasks):
@@ -132,23 +132,14 @@ async def download_video(request: DownloadRequest, background_tasks: BackgroundT
             media_type = "audio/mpeg"
 
         else:
+            # 極速魔法：拔除所有耗時的轉檔指令，只做最單純的「合併」
             ydl_opts = {
-                # 關鍵防線 1：要求 yt-dlp 盡可能找含有 H.264 (avc1) 的格式
-                # 這樣就不會有 "無法被 QuickTime 播放" 的問題
-                'format': f"{request.format_id}[vcodec^=avc1]+bestaudio/best",
-
-                # 關鍵防線 2：如果真的找不到，就直接合併成 mp4，但不做任何二次轉檔
-                'merge_output_format': 'mp4',
+                'format': f"{request.format_id}",
+                'merge_output_format': 'mp4',  # 只要求放進 mp4 容器，不改變內部編碼
                 'outtmpl': '%(title)s.%(ext)s',
                 'noplaylist': True,
                 'extract_flat': 'in_playlist',
-                'keepvideo': False,
-
-                # 只要求 FFmpeg 把檔案裝進 MP4 箱子裡，不要動裡面的編碼
-                'postprocessors': [{
-                    'key': 'FFmpegVideoConvertor',
-                    'preferedformat': 'mp4',
-                }]
+                'keepvideo': False
             }
             target_ext = ".mp4"
             media_type = "video/mp4"
@@ -167,7 +158,7 @@ async def download_video(request: DownloadRequest, background_tasks: BackgroundT
             "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
         }
 
-        # 伺服器傳送完畢後，由 BackgroundTasks 負責大掃除
+        # 傳送檔案給前端後，在背景大掃除
         background_tasks.add_task(cleanup_file, filename)
 
         return FileResponse(path=filename, media_type=media_type, headers=headers)
