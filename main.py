@@ -1,6 +1,6 @@
 import os
 import urllib.parse
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,19 +16,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # 定義接收的資料格式
 class InfoRequest(BaseModel):
     url: str
-
 
 class DownloadRequest(BaseModel):
     url: str
     format_id: str
     type: str = "video"  # 區分是影片還是純音樂
 
+# 👇 刪除檔案的小幫手 (必須放在最外層獨立出來)
+def cleanup_file(path: str):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"🗑️ 已成功刪除伺服器暫存檔：{path}")
+    except Exception as e:
+        print(f"⚠️ 刪除暫存檔失敗：{e}")
 
-# 👇 新增：洗網址專用小工具，把 &list= 後面的東西全部切掉
+# 洗網址專用小工具，把 &list= 後面的東西全部切掉
 def clean_youtube_url(url: str) -> str:
     parsed_url = urllib.parse.urlparse(url)
     query_params = urllib.parse.parse_qs(parsed_url.query)
@@ -41,14 +47,12 @@ def clean_youtube_url(url: str) -> str:
     # 如果沒有 'v' 參數 (可能是 youtu.be 縮網址或其他形式)，就原封不動回傳
     return url
 
-
 # ==========================================
 # API 1: 解析 YouTube 網址，回傳畫質菜單
 # ==========================================
 @app.post("/api/info")
 async def get_video_info(request: InfoRequest):
     try:
-        # 👇 收到網址第一時間，先把它洗乾淨
         clean_url = clean_youtube_url(request.url)
 
         ydl_opts = {
@@ -58,7 +62,6 @@ async def get_video_info(request: InfoRequest):
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 使用洗乾淨的網址去抓資訊
             info = ydl.extract_info(clean_url, download=False)
 
         if info.get('_type') == 'playlist':
@@ -104,12 +107,12 @@ async def get_video_info(request: InfoRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
 # ==========================================
 # API 2: 正式下載影片或 MP3 (Apple MOV 終極相容版)
 # ==========================================
 @app.post("/api/download")
-async def download_video(request: DownloadRequest):
+# 👇 這裡加入 background_tasks: BackgroundTasks
+async def download_video(request: DownloadRequest, background_tasks: BackgroundTasks):
     try:
         clean_url = clean_youtube_url(request.url)
 
@@ -131,24 +134,19 @@ async def download_video(request: DownloadRequest):
         else:
             # 改為下載 Apple 最相容的 .mov 格式
             ydl_opts = {
-                # 不挑了，直接要最好的影片加聲音，但指定要 Apple 相容的格式
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
-
-                # 👇 將合併容器強制改為 mov (Apple 的親生兒子格式)
                 'merge_output_format': 'mov',
                 'outtmpl': '%(title)s.%(ext)s',
                 'noplaylist': True,
                 'extract_flat': 'in_playlist',
                 'keepvideo': False,
-
-                # 呼叫 FFmpeg 幫忙包裝成 mov
                 'postprocessors': [{
                     'key': 'FFmpegVideoConvertor',
                     'preferedformat': 'mov',
                 }]
             }
             target_ext = ".mov"
-            media_type = "video/quicktime"  # 改變回傳的媒體類型
+            media_type = "video/quicktime"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=True)
@@ -164,6 +162,10 @@ async def download_video(request: DownloadRequest):
             "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
         }
 
+        # 👇 在傳送檔案前，把「刪除檔案」的任務加進背景排程
+        background_tasks.add_task(cleanup_file, filename)
+
+        # 👇 伺服器會先把檔案傳給前端，傳完之後，自動偷偷執行上面那行刪除指令！
         return FileResponse(path=filename, media_type=media_type, headers=headers)
 
     except Exception as e:
