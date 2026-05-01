@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import axios from 'axios';
 
 // ==========================================
-// 🎨 樣式設定區 (新增了進度條與遮罩的樣式)
+// 🎨 樣式設定區
 // ==========================================
 const styles = {
   container: {
@@ -145,7 +145,6 @@ const styles = {
     cursor: 'pointer',
     boxShadow: '0 4px 15px rgba(108, 92, 231, 0.4)',
   },
-  // 👇 遮罩與進度條的全新樣式
   progressOverlay: {
     position: 'fixed',
     top: 0, left: 0, right: 0, bottom: 0,
@@ -172,7 +171,7 @@ const styles = {
   progressBar: {
     height: '100%',
     background: 'linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%)',
-    transition: 'width 0.8s ease', // 讓進度條跑起來很滑順
+    transition: 'width 0.8s ease',
     boxShadow: '0 0 15px rgba(0, 210, 255, 0.5)',
   },
   progressText: {
@@ -189,7 +188,6 @@ function App() {
   const [status, setStatus] = useState('');
   const [statusColor, setStatusColor] = useState('#00d2ff');
 
-  // 掌控載入狀態與進度條
   const [isLoading, setIsLoading] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -202,7 +200,6 @@ function App() {
     setStatusColor(color);
   };
 
-  // 解析網址
   const handleGetInfo = async () => {
     if (!url) {
       updateStatus('⚠️ 請先輸入 YouTube 網址喔！', '#ff9f43');
@@ -225,15 +222,16 @@ function App() {
     }
   };
 
-  // 下載影片或音樂
+  // 下載影片或音樂 (🌟 修改了檔名儲存邏輯)
   const handleDownload = async (formatId, resolution, type = 'video') => {
-    setIsDownloading(true); // 開啟進度條遮罩
+    setIsDownloading(true);
     setProgress(0);
 
-    // 智慧判斷：是不是高畫質？(需要轉檔的)
+    // 🌟 第一步：先抓取網頁上解析好的影片標題，並把會讓電腦報錯的特殊符號替換成底線 "_"
+    const safeTitle = videoInfo.title ? videoInfo.title.replace(/[\\/:*?"<>|]/g, "_") : "youtube_download";
+
     const isHighRes = resolution === '1440p' || resolution === '4K';
 
-    // 根據畫質設定不同的提示文字
     if (type === 'audio') {
       setProgressMsg('🎵 正在提取最高音質 MP3...');
     } else if (isHighRes) {
@@ -242,13 +240,10 @@ function App() {
       setProgressMsg(`⚡ 正在為您極速打包 ${resolution} 影片...`);
     }
 
-    // 🌟 智慧模擬進度條魔法
     timerRef.current = setInterval(() => {
       setProgress((oldProgress) => {
-        // 如果是高畫質，進度條跑得慢一點；如果是普通畫質或 MP3，跑得快一點
         const step = isHighRes ? (Math.random() * 2 + 0.5) : (Math.random() * 8 + 2);
         const newProgress = oldProgress + step;
-        // 最高卡在 95%，等待伺服器真正把檔案傳過來
         return newProgress >= 95 ? 95 : newProgress;
       });
     }, 1000);
@@ -256,29 +251,22 @@ function App() {
     try {
       const response = await axios.post('http://127.0.0.1:8000/api/download',
         { url: url, format_id: formatId, type: type },
-        { responseType: 'blob' } // 重要：告訴 axios 我們要收檔案
+        { responseType: 'blob' }
       );
 
-      // 伺服器傳送完畢，瞬間把進度條拉滿！
       clearInterval(timerRef.current);
       setProgress(100);
       setProgressMsg('✅ 處理完成！準備儲存至您的電腦...');
 
-      // 抓取後端設定的檔案名稱
-      const contentDisposition = response.headers['content-disposition'];
-      let fileName = type === 'audio' ? "downloaded_audio.mp3" : "downloaded_video.mp4";
-      if (contentDisposition) {
-        const fileNameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/);
-        if (fileNameMatch && fileNameMatch.length === 2) {
-          fileName = decodeURIComponent(fileNameMatch[1]);
-        }
-      }
+      // 🌟 第二步：決定副檔名，並把我們處理好的真實標題合體！
+      const fileExtension = type === 'audio' ? ".mp3" : ".mp4";
+      const finalFileName = `${safeTitle}${fileExtension}`;
 
-      // 觸發瀏覽器下載
+      // 觸發瀏覽器下載，這時候它就會用我們給的中文名稱存檔囉
       const fileUrl = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = fileUrl;
-      link.setAttribute('download', fileName);
+      link.setAttribute('download', finalFileName);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -291,7 +279,6 @@ function App() {
       updateStatus('❌ 下載失敗，伺服器可能發生錯誤。', '#ff4757');
       console.error(error);
     } finally {
-      // 延遲一秒鐘再關閉遮罩，讓使用者看到 100% 的成就感
       setTimeout(() => {
         setIsDownloading(false);
       }, 1000);
@@ -300,7 +287,6 @@ function App() {
 
   return (
     <>
-      {/* 簡單的全局動畫樣式 */}
       <style>{`
         @keyframes fadeIn {
           from { opacity: 0; transform: translateY(20px); }
@@ -312,7 +298,6 @@ function App() {
         .input-focus:focus { border-color: #00d2ff !important; box-shadow: 0 0 15px rgba(0, 210, 255, 0.3) !important; }
       `}</style>
 
-      {/* 🌟 這是全新的全螢幕下載進度條遮罩 */}
       {isDownloading && (
         <div style={styles.progressOverlay}>
           <div style={{ fontSize: '4rem', marginBottom: '20px' }}>📦</div>
@@ -337,12 +322,9 @@ function App() {
       )}
 
       <div style={styles.container}>
-
-        {/* 標題區塊 */}
         <h1 style={styles.header}>快樂小狗 YT <span style={{ color: '#00d2ff' }}>Studio</span></h1>
         <p style={styles.subtitle}>極致流暢的影音下載體驗</p>
 
-        {/* 輸入區塊 */}
         <div style={styles.inputCard}>
           <input
             className="input-focus"
@@ -366,19 +348,16 @@ function App() {
           </button>
         </div>
 
-        {/* 狀態提示文字 */}
         <div style={{ ...styles.statusText, color: statusColor }}>
           {status}
         </div>
 
-        {/* 菜單結果區塊 */}
         {videoInfo && !isLoading && (
           <div style={styles.resultCard}>
             <div style={styles.titleArea}>
               🎬 <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{videoInfo.title}</span>
             </div>
 
-            {/* MP3 下載專區 */}
             <div style={styles.mp3Box} className="hover-scale">
               <div>
                 <h3 style={{ margin: 0, color: '#2d3436', fontSize: '1.2rem' }}>只想聽音樂？</h3>
@@ -394,7 +373,6 @@ function App() {
               </button>
             </div>
 
-            {/* 影片畫質列表 */}
             <div style={{ marginTop: '10px' }}>
               <h4 style={{ color: '#a4b0be', marginBottom: '15px', paddingLeft: '5px' }}>選擇影片畫質</h4>
               {videoInfo.options.map((opt, index) => (
@@ -419,7 +397,6 @@ function App() {
                 </div>
               ))}
             </div>
-
           </div>
         )}
       </div>
