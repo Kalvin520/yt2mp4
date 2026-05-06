@@ -11,7 +11,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
+def get_ffmpeg_path():
+    """自動找到 ffmpeg，不管是開發環境還是打包後都能用"""
+    if getattr(sys, 'frozen', False):
+        # 打包後：ffmpeg 在 PyInstaller 的暫存資料夾裡
+        base = sys._MEIPASS
+    else:
+        # 開發環境：ffmpeg 在專案根目錄
+        return "/opt/homebrew/bin"
+        base = os.path.dirname(os.path.abspath(__file__))
+    return base  # 回傳資料夾路徑，yt-dlp 會自己找 ffmpeg 執行檔
 
+FFMPEG_PATH = get_ffmpeg_path()
 app = FastAPI()
 
 # 允許前端網頁來呼叫我們的後端
@@ -106,7 +117,7 @@ def clean_youtube_url(url: str) -> str:
 async def get_video_info(request: InfoRequest):
     try:
         clean_url = clean_youtube_url(request.url)
-        ydl_opts = {'skip_download': True, 'noplaylist': True, 'extract_flat': 'in_playlist'}
+        ydl_opts = {'skip_download': True, 'noplaylist': True, 'ffmpeg_location': FFMPEG_PATH, 'extract_flat': 'in_playlist'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
         if info.get('_type') == 'playlist':
@@ -160,19 +171,19 @@ async def start_download_task(request: DownloadRequest, background_tasks: Backgr
     return {"success": True, "task_id": task_id}
 
 def run_download(request: DownloadRequest, task_id: str):
-    """真正的下載函式，會在背景執行緒中被呼叫"""
     try:
         clean_url = clean_youtube_url(request.url)
         progress_hook = ProgressHook(task_id)
 
         ydl_opts = {
             'format': request.format_id,
+            'ffmpeg_location': FFMPEG_PATH,
             'merge_output_format': 'mp4',
-            'outtmpl': f'{task_id}_%(title)s.%(ext)s', # 檔名加入 task_id 避免衝突
+            'outtmpl': f'{task_id}_%(title)s.%(ext)s',
             'noplaylist': True,
             'keepvideo': False,
             'progress_hooks': [progress_hook],
-            'postprocessor_hooks': [lambda d: progress_hook(d) if d['status'] == 'finished' else None],
+            # ✅ 拿掉有問題的 postprocessor_hooks
         }
 
         if request.type == "audio":
@@ -183,8 +194,8 @@ def run_download(request: DownloadRequest, task_id: str):
             if "1440" in request.resolution or "4K" in request.resolution or "2160" in request.resolution:
                 print(f"🚀 偵測到 {request.resolution} 超高畫質！啟動 H.264 強制轉檔模式...")
                 ydl_opts['postprocessor_args'] = ['-vcodec', 'libx264', '-preset', 'fast', '-crf', '23']
-                # 如果是高畫質轉檔，我們需要一個假的進度更新器
-                ydl_opts['postprocessor_hooks'].append(lambda d: ffmpeg_progress_hook(task_id))
+                # ✅ 單獨設定高畫質的 hook
+                ydl_opts['postprocessor_hooks'] = [lambda d: ffmpeg_progress_hook(task_id)]
             target_ext = ".mp4"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -194,22 +205,21 @@ def run_download(request: DownloadRequest, task_id: str):
 
         downloads_dir = os.path.join(os.path.expanduser('~'), 'Downloads')
         os.makedirs(downloads_dir, exist_ok=True)
-        
-        # 把檔名中的 task_id 去掉
+
         final_filename = os.path.basename(filename).replace(f'{task_id}_', '')
         final_path = os.path.join(downloads_dir, final_filename)
-        
+
         counter = 1
         base_name, ext = os.path.splitext(final_filename)
         while os.path.exists(final_path):
             final_path = os.path.join(downloads_dir, f"{base_name} ({counter}){ext}")
             counter += 1
-            
+
         shutil.move(filename, final_path)
         print(f"✅ 檔案已成功搬移至: {final_path}")
-        
+
+        # ✅ 不需要 cleanup_file，move 之後原始位置已經沒有檔案了
         progress_data[task_id] = {"status": "completed", "progress": 100, "message": "下載完成！"}
-        cleanup_file(filename)
 
     except Exception as e:
         print(f"下載任務 {task_id} 失敗: {str(e)}")
