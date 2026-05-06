@@ -63,13 +63,7 @@ const styles = {
     color: 'white',
     cursor: 'pointer',
     boxShadow: '0 4px 15px rgba(0, 210, 255, 0.3)',
-    transition: 'transform 0.2s, box-shadow 0.2s',
-  },
-  btnDisabled: {
-    background: '#555',
-    cursor: 'not-allowed',
-    boxShadow: 'none',
-    color: '#999',
+    transition: 'all 0.3s ease',
   },
   statusText: {
     marginTop: '25px',
@@ -132,7 +126,7 @@ const styles = {
     fontSize: '15px',
     cursor: 'pointer',
     boxShadow: '0 4px 10px rgba(255, 71, 87, 0.3)',
-    transition: 'all 0.2s',
+    transition: 'all 0.3s ease',
   },
   btnMp3: {
     padding: '12px 25px',
@@ -144,6 +138,7 @@ const styles = {
     fontSize: '16px',
     cursor: 'pointer',
     boxShadow: '0 4px 15px rgba(108, 92, 231, 0.4)',
+    transition: 'all 0.3s ease',
   },
   progressOverlay: {
     position: 'fixed',
@@ -171,7 +166,7 @@ const styles = {
   progressBar: {
     height: '100%',
     background: 'linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%)',
-    transition: 'width 0.8s ease',
+    transition: 'width 0.5s ease',
     boxShadow: '0 0 15px rgba(0, 210, 255, 0.5)',
   },
   progressText: {
@@ -195,6 +190,11 @@ function App() {
 
   const timerRef = useRef(null);
 
+  const getApiBaseUrl = () => {
+    const { protocol, host } = window.location;
+    return `${protocol}//${host}`;
+  };
+
   const updateStatus = (msg, color) => {
     setStatus(msg);
     setStatusColor(color);
@@ -211,77 +211,92 @@ function App() {
     setVideoInfo(null);
 
     try {
-      const response = await axios.post('http://127.0.0.1:8000/api/info', { url: url });
+      const response = await axios.post(`${getApiBaseUrl()}/api/info`, { url: url });
       setVideoInfo(response.data);
       updateStatus('✨ 解析成功！請在下方選擇格式', '#1dd1a1');
     } catch (error) {
-      updateStatus('❌ 解析失敗，請確認網址是否正確。', '#ff4757');
+      const errorMsg = error.response?.data?.detail || error.message || '無法連線伺服器';
+      updateStatus(`❌ 解析失敗: ${errorMsg}`, '#ff4757');
       console.error(error);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // 下載影片或音樂 (🌟 修改了檔名儲存邏輯)
+  const pollProgress = async (taskId) => {
+    try {
+      const res = await axios.post(`${getApiBaseUrl()}/api/progress`, { task_id: taskId });
+      const data = res.data;
+
+      if (data.status === 'completed') {
+        setProgress(100);
+        setProgressMsg('✅ 處理完成！');
+        updateStatus(`🎉 檔案已成功儲存至您的「下載」資料夾！`, '#1dd1a1');
+        clearInterval(timerRef.current);
+        
+        setTimeout(() => {
+          setIsDownloading(false);
+          if (document.activeElement instanceof HTMLElement) {
+            document.activeElement.blur();
+          }
+        }, 2000);
+        return;
+      }
+
+      if (data.status === 'error') {
+        clearInterval(timerRef.current);
+        updateStatus(`❌ 下載失敗: ${data.message}`, '#ff4757');
+        setIsDownloading(false);
+        return;
+      }
+
+      // 更新進度與訊息
+      if (data.progress !== undefined) {
+        setProgress(data.progress);
+      }
+      if (data.message) {
+        setProgressMsg(data.message);
+      }
+
+    } catch (error) {
+      console.error("輪詢進度失敗:", error);
+    }
+  };
+
+
   const handleDownload = async (formatId, resolution, type = 'video') => {
     setIsDownloading(true);
     setProgress(0);
-
-    // 🌟 第一步：先抓取網頁上解析好的影片標題，並把會讓電腦報錯的特殊符號替換成底線 "_"
-    const safeTitle = videoInfo.title ? videoInfo.title.replace(/[\\/:*?"<>|]/g, "_") : "youtube_download";
-
-    const isHighRes = resolution === '1440p' || resolution === '4K';
-
-    if (type === 'audio') {
-      setProgressMsg('🎵 正在提取最高音質 MP3...');
-    } else if (isHighRes) {
-      setProgressMsg(`🚀 啟動 ${resolution} 高畫質轉檔引擎 (需時較長，請保持網頁開啟)...`);
-    } else {
-      setProgressMsg(`⚡ 正在為您極速打包 ${resolution} 影片...`);
-    }
-
-    timerRef.current = setInterval(() => {
-      setProgress((oldProgress) => {
-        const step = isHighRes ? (Math.random() * 2 + 0.5) : (Math.random() * 8 + 2);
-        const newProgress = oldProgress + step;
-        return newProgress >= 95 ? 95 : newProgress;
-      });
-    }, 1000);
+    setProgressMsg('🚀 正在初始化下載任務...');
 
     try {
-      const response = await axios.post('http://127.0.0.1:8000/api/download',
-        { url: url, format_id: formatId, type: type },
-        { responseType: 'blob' }
+      // 1. 發送下載請求，後端現在會「立刻」回傳一個 task_id，而不是等下載完
+      const response = await axios.post(`${getApiBaseUrl()}/api/download`,
+        { 
+          url: url, 
+          format_id: formatId, 
+          type: type,
+          resolution: resolution 
+        }
       );
 
-      clearInterval(timerRef.current);
-      setProgress(100);
-      setProgressMsg('✅ 處理完成！準備儲存至您的電腦...');
+      if (response.data.success && response.data.task_id) {
+        const taskId = response.data.task_id;
+        
+        // 2. 開始「輪詢」：每隔 1 秒問一次後端「現在進度到哪了？」
+        timerRef.current = setInterval(() => {
+          pollProgress(taskId);
+        }, 1000);
 
-      // 🌟 第二步：決定副檔名，並把我們處理好的真實標題合體！
-      const fileExtension = type === 'audio' ? ".mp3" : ".mp4";
-      const finalFileName = `${safeTitle}${fileExtension}`;
-
-      // 觸發瀏覽器下載，這時候它就會用我們給的中文名稱存檔囉
-      const fileUrl = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
-      link.href = fileUrl;
-      link.setAttribute('download', finalFileName);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(fileUrl);
-
-      updateStatus('🎉 檔案已成功下載完成！', '#1dd1a1');
+      } else {
+        throw new Error('無法建立下載任務');
+      }
 
     } catch (error) {
-      clearInterval(timerRef.current);
-      updateStatus('❌ 下載失敗，伺服器可能發生錯誤。', '#ff4757');
-      console.error(error);
-    } finally {
-      setTimeout(() => {
-        setIsDownloading(false);
-      }, 1000);
+      const errorMsg = error.response?.data?.detail || error.message || '伺服器發生不明錯誤';
+      updateStatus(`❌ 下載失敗: ${errorMsg}`, '#ff4757');
+      console.error("下載錯誤詳情:", error);
+      setIsDownloading(false);
     }
   };
 
@@ -295,6 +310,7 @@ function App() {
         .hover-scale:hover { transform: scale(1.02); }
         .hover-btn:hover:not(:disabled) { transform: translateY(-2px); filter: brightness(1.1); }
         .hover-btn:active:not(:disabled) { transform: translateY(1px); }
+        .hover-btn:disabled { opacity: 0.5; cursor: not-allowed; filter: grayscale(50%); transform: none; box-shadow: none; }
         .input-focus:focus { border-color: #00d2ff !important; box-shadow: 0 0 15px rgba(0, 210, 255, 0.3) !important; }
       `}</style>
 
@@ -313,9 +329,9 @@ function App() {
             {Math.floor(progress)}%
           </div>
 
-          {progress >= 95 && progress < 100 && (
+          {progress >= 80 && progress < 100 && (
             <p style={{ marginTop: '15px', color: '#b2bec3', fontSize: '0.9rem' }}>
-              正在封裝檔案中，即將完成...
+              正在進行影音合併或 H.264 轉檔，這可能需要幾分鐘...
             </p>
           )}
         </div>
@@ -339,10 +355,7 @@ function App() {
             className="hover-btn"
             onClick={handleGetInfo}
             disabled={isLoading || isDownloading}
-            style={{
-              ...styles.btnPrimary,
-              ...(isLoading || isDownloading ? styles.btnDisabled : {})
-            }}
+            style={styles.btnPrimary}
           >
             {isLoading && !videoInfo ? '🚀 正在解析中...' : '✨ 立即解析網址'}
           </button>
@@ -367,7 +380,7 @@ function App() {
                 className="hover-btn"
                 onClick={() => handleDownload('bestaudio', '音樂', 'audio')}
                 disabled={isDownloading}
-                style={{ ...styles.btnMp3, ...(isDownloading ? styles.btnDisabled : {}) }}
+                style={styles.btnMp3}
               >
                 🎵 下載 MP3
               </button>
@@ -390,7 +403,7 @@ function App() {
                     className="hover-btn"
                     onClick={() => handleDownload(opt.format_id, opt.resolution, 'video')}
                     disabled={isDownloading}
-                    style={{ ...styles.btnDownload, ...(isDownloading ? styles.btnDisabled : {}) }}
+                    style={styles.btnDownload}
                   >
                     下載 ⬇️
                   </button>
