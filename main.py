@@ -4,28 +4,22 @@ import shutil
 import urllib.parse
 import glob
 import uuid
-import json
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
+
 def get_ffmpeg_path():
-    """自動找到 ffmpeg，不管是開發環境還是打包後都能用"""
     if getattr(sys, 'frozen', False):
-        # 打包後：ffmpeg 在 PyInstaller 的暫存資料夾裡
-        base = sys._MEIPASS
+        return sys._MEIPASS
     else:
-        # 開發環境：ffmpeg 在專案根目錄
         return "/opt/homebrew/bin"
-        base = os.path.dirname(os.path.abspath(__file__))
-    return base  # 回傳資料夾路徑，yt-dlp 會自己找 ffmpeg 執行檔
 
 FFMPEG_PATH = get_ffmpeg_path()
 app = FastAPI()
 
-# 允許前端網頁來呼叫我們的後端
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,10 +27,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==========================================
-# 🌟 進度追蹤系統
-# ==========================================
-# 使用一個簡單的字典來儲存每個下載任務的進度
 progress_data = {}
 
 class ProgressHook:
@@ -46,35 +36,26 @@ class ProgressHook:
 
     def __call__(self, d):
         if d['status'] == 'downloading':
-            # 提取下載進度
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate')
             downloaded_bytes = d.get('downloaded_bytes')
             if total_bytes and downloaded_bytes:
                 progress = (downloaded_bytes / total_bytes) * 100
-                # 我們將下載階段的進度限制在 0-80% 之間
-                progress_data[self.task_id]["progress"] = progress * 0.8 
+                progress_data[self.task_id]["progress"] = progress * 0.8
                 progress_data[self.task_id]["message"] = f"下載中... {int(progress)}%"
-
         elif d['status'] == 'finished':
-            # 下載完成，進入轉檔/合併階段
             progress_data[self.task_id]["progress"] = 80
             progress_data[self.task_id]["message"] = "下載完成，準備進行最終處理..."
-
         elif d['status'] == 'error':
             progress_data[self.task_id]["status"] = "error"
             progress_data[self.task_id]["message"] = "下載過程中發生錯誤"
 
 def ffmpeg_progress_hook(task_id):
-    """一個假的 ffmpeg 進度更新器，讓進度條在轉檔時也能慢慢動"""
     if task_id in progress_data and progress_data[task_id].get("status") != "completed":
         current_progress = progress_data[task_id].get("progress", 80)
         if current_progress < 99:
-            # 轉檔階段的進度在 80-99% 之間緩慢移動
             progress_data[task_id]["progress"] = min(current_progress + 0.1, 99)
             progress_data[task_id]["message"] = "影片轉檔中，這可能需要幾分鐘..."
 
-
-# 定義接收的資料格式
 class InfoRequest(BaseModel):
     url: str
 
@@ -87,9 +68,6 @@ class DownloadRequest(BaseModel):
 class ProgressRequest(BaseModel):
     task_id: str
 
-# ==========================================
-# 🛠️ 刪除檔案小幫手
-# ==========================================
 def cleanup_file(path: str):
     try:
         base_name = os.path.splitext(path)[0]
@@ -110,9 +88,6 @@ def clean_youtube_url(url: str) -> str:
         return f"https://www.youtube.com/watch?v={video_id}"
     return url
 
-# ==========================================
-# API 1: 解析 YouTube 網址 
-# ==========================================
 @app.post("/api/info")
 async def get_video_info(request: InfoRequest):
     try:
@@ -160,13 +135,9 @@ async def get_video_info(request: InfoRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ==========================================
-# API 2: 啟動下載任務 (非同步)
-# ==========================================
 @app.post("/api/download")
 async def start_download_task(request: DownloadRequest, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())
-    # 將下載任務丟到背景執行
     background_tasks.add_task(run_download, request, task_id)
     return {"success": True, "task_id": task_id}
 
@@ -175,15 +146,19 @@ def run_download(request: DownloadRequest, task_id: str):
         clean_url = clean_youtube_url(request.url)
         progress_hook = ProgressHook(task_id)
 
+        # ✅ 修正一：直接指定下載到 Downloads 資料夾，避免寫入唯讀的 _MEIPASS
+        downloads_dir = os.path.join(os.path.expanduser('~'), 'Downloads')
+        os.makedirs(downloads_dir, exist_ok=True)
+
         ydl_opts = {
             'format': request.format_id,
             'ffmpeg_location': FFMPEG_PATH,
             'merge_output_format': 'mp4',
-            'outtmpl': f'{task_id}_%(title)s.%(ext)s',
+            # ✅ 修正二：outtmpl 加上完整路徑
+            'outtmpl': os.path.join(downloads_dir, f'{task_id}_%(title)s.%(ext)s'),
             'noplaylist': True,
             'keepvideo': False,
             'progress_hooks': [progress_hook],
-            # ✅ 拿掉有問題的 postprocessor_hooks
         }
 
         if request.type == "audio":
@@ -194,7 +169,6 @@ def run_download(request: DownloadRequest, task_id: str):
             if "1440" in request.resolution or "4K" in request.resolution or "2160" in request.resolution:
                 print(f"🚀 偵測到 {request.resolution} 超高畫質！啟動 H.264 強制轉檔模式...")
                 ydl_opts['postprocessor_args'] = ['-vcodec', 'libx264', '-preset', 'fast', '-crf', '23']
-                # ✅ 單獨設定高畫質的 hook
                 ydl_opts['postprocessor_hooks'] = [lambda d: ffmpeg_progress_hook(task_id)]
             target_ext = ".mp4"
 
@@ -203,9 +177,7 @@ def run_download(request: DownloadRequest, task_id: str):
             filename = ydl.prepare_filename(info)
             filename = os.path.splitext(filename)[0] + target_ext
 
-        downloads_dir = os.path.join(os.path.expanduser('~'), 'Downloads')
-        os.makedirs(downloads_dir, exist_ok=True)
-
+        # ✅ 修正三：檔案已在 Downloads，只需重新命名去掉 task_id 前綴
         final_filename = os.path.basename(filename).replace(f'{task_id}_', '')
         final_path = os.path.join(downloads_dir, final_filename)
 
@@ -215,27 +187,20 @@ def run_download(request: DownloadRequest, task_id: str):
             final_path = os.path.join(downloads_dir, f"{base_name} ({counter}){ext}")
             counter += 1
 
-        shutil.move(filename, final_path)
-        print(f"✅ 檔案已成功搬移至: {final_path}")
+        os.rename(filename, final_path)
+        print(f"✅ 檔案已儲存至: {final_path}")
 
-        # ✅ 不需要 cleanup_file，move 之後原始位置已經沒有檔案了
         progress_data[task_id] = {"status": "completed", "progress": 100, "message": "下載完成！"}
 
     except Exception as e:
         print(f"下載任務 {task_id} 失敗: {str(e)}")
         progress_data[task_id] = {"status": "error", "message": str(e)}
 
-# ==========================================
-# API 3: 查詢進度
-# ==========================================
 @app.post("/api/progress")
 async def get_progress(request: ProgressRequest):
     progress = progress_data.get(request.task_id, {"status": "not_found", "message": "找不到任務"})
     return JSONResponse(content=progress)
 
-# ==========================================
-# 靜態檔案路由 
-# ==========================================
 def get_frontend_dir():
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
