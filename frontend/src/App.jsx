@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import { useState, useRef } from 'react';
 import axios from 'axios';
 
 // ==========================================
@@ -191,8 +191,7 @@ function App() {
   const timerRef = useRef(null);
 
   const getApiBaseUrl = () => {
-    const { protocol, host } = window.location;
-    return `${protocol}//${host}`;
+    return (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
   };
 
   const updateStatus = (msg, color) => {

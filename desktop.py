@@ -1,10 +1,10 @@
-import os
-import sys
 import threading
 import uvicorn
 import webview
 import socket
 from main import app  # 引入我們寫好的 FastAPI App
+
+server = None
 
 def find_free_port():
     """自動找尋一個系統上沒人用的 Port"""
@@ -16,6 +16,7 @@ def find_free_port():
 
 def run_server(port):
     """在背景執行緒中啟動 FastAPI"""
+    global server
     # 關閉 uvicorn 的預設輸出，讓終端機乾淨一點
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
@@ -27,9 +28,10 @@ class Api:
         self.window = window
 
 def on_closed():
-    """當使用者關閉視窗時觸發：強制結束程式，釋放所有資源"""
+    """當使用者關閉視窗時觸發：通知背景伺服器結束"""
     print("視窗已關閉，正在結束程式...")
-    os._exit(0)  # 強制且乾淨地關閉整個 Python Process
+    if server:
+        server.should_exit = True
 
 if __name__ == '__main__':
     # 1. 取得可用 Port
@@ -55,3 +57,5 @@ if __name__ == '__main__':
 
     # 啟動 WebView 視窗 (會卡在這裡直到視窗關閉)
     webview.start()
+    if server_thread.is_alive():
+        server_thread.join(timeout=5)

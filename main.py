@@ -1,8 +1,10 @@
 import os
 import sys
-import shutil
+import platform
 import urllib.parse
-import glob
+import re
+import threading
+import time
 import uuid
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -11,28 +13,118 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
 
+TASK_TTL_SECONDS = 60 * 30
+progress_lock = threading.Lock()
+progress_data = {}
+
 def get_ffmpeg_path():
+    bundled_dir = getattr(sys, '_MEIPASS', None)
     if getattr(sys, 'frozen', False):
-        return sys._MEIPASS
-    else:
-        return "/opt/homebrew/bin"
+        return bundled_dir
+
+    ffmpeg_from_env = os.environ.get("FFMPEG_PATH")
+    if ffmpeg_from_env:
+        return ffmpeg_from_env
+
+    system_name = platform.system()
+    if system_name == "Darwin":
+        for candidate in ("/opt/homebrew/bin", "/usr/local/bin"):
+            if os.path.exists(os.path.join(candidate, "ffmpeg")):
+                return candidate
+
+    return None
+
+def get_downloads_dir():
+    downloads_dir = os.path.join(os.path.expanduser('~'), 'Downloads')
+    os.makedirs(downloads_dir, exist_ok=True)
+    return downloads_dir
+
+def sanitize_filename(filename: str) -> str:
+    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', filename)
+    sanitized = sanitized.rstrip(' .')
+    return sanitized[:180] or "download"
+
+def set_progress(task_id: str, **updates):
+    with progress_lock:
+        current = progress_data.setdefault(task_id, {})
+        current.update(updates)
+        current["updated_at"] = time.time()
+
+def get_task_progress(task_id: str):
+    with progress_lock:
+        progress = progress_data.get(task_id)
+        if not progress:
+            return None
+        return {key: value for key, value in progress.items() if key != "updated_at"}
+
+def cleanup_old_tasks():
+    cutoff = time.time() - TASK_TTL_SECONDS
+    with progress_lock:
+        expired_ids = [
+            task_id
+            for task_id, progress in progress_data.items()
+            if progress.get("updated_at", 0) < cutoff
+        ]
+        for task_id in expired_ids:
+            progress_data.pop(task_id, None)
+
+def parse_resolution_height(resolution: str) -> int:
+    if resolution == "4K":
+        return 2160
+    match = re.search(r"(\d+)", resolution)
+    return int(match.group(1)) if match else 0
+
+def get_h264_transcode_args(resolution: str) -> list[str]:
+    height = parse_resolution_height(resolution)
+    if platform.system() == "Darwin":
+        bitrate = "24000k" if height >= 2160 else "12000k"
+        return [
+            "-c:v", "h264_videotoolbox",
+            "-b:v", bitrate,
+            "-allow_sw", "1",
+            "-c:a", "aac",
+            "-b:a", "192k",
+        ]
+
+    return ["-vcodec", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "192k"]
+
+def friendly_error_message(error: Exception) -> str:
+    message = str(error)
+    lowered = message.lower()
+
+    if "ffmpeg" in lowered or "ffprobe" in lowered:
+        return "找不到 FFmpeg，請確認已安裝 FFmpeg，或使用打包版內建的 ffmpeg.exe。"
+    if "permission denied" in lowered or "access is denied" in lowered:
+        return "沒有權限寫入下載資料夾，請確認 Downloads 資料夾可寫入，或關閉可能佔用檔案的程式。"
+    if "no such file" in lowered or "cannot find the file" in lowered or "系統找不到指定的檔案" in message:
+        return "找不到下載後的暫存檔，可能是防毒軟體、權限或檔名限制造成，請再試一次。"
+    if "file exists" in lowered or "being used by another process" in lowered:
+        return "目標檔案可能正在被其他程式使用，請關閉播放器或檔案總管預覽後再試。"
+    if "unsupported url" in lowered:
+        return "不支援這個網址，請貼上單一 YouTube 影片網址。"
+    if "playlist" in lowered or "播放清單" in message:
+        return "目前不支援下載整個播放清單，請貼上單一影片網址。"
+    if "sign in" in lowered or "login" in lowered:
+        return "這部影片需要登入或受到限制，目前無法直接下載。"
+    if "http error" in lowered or "unable to download" in lowered or "network" in lowered:
+        return "連線到 YouTube 時發生問題，請確認網路連線後再試。"
+
+    return message or "發生未知錯誤，請稍後再試。"
 
 FFMPEG_PATH = get_ffmpeg_path()
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-progress_data = {}
-
 class ProgressHook:
     def __init__(self, task_id):
         self.task_id = task_id
-        progress_data[self.task_id] = {"status": "downloading", "progress": 0, "message": "準備開始下載..."}
+        set_progress(self.task_id, status="downloading", progress=0, message="準備開始下載...")
 
     def __call__(self, d):
         if d['status'] == 'downloading':
@@ -40,21 +132,18 @@ class ProgressHook:
             downloaded_bytes = d.get('downloaded_bytes')
             if total_bytes and downloaded_bytes:
                 progress = (downloaded_bytes / total_bytes) * 100
-                progress_data[self.task_id]["progress"] = progress * 0.8
-                progress_data[self.task_id]["message"] = f"下載中... {int(progress)}%"
+                set_progress(self.task_id, progress=progress * 0.8, message=f"下載中... {int(progress)}%")
         elif d['status'] == 'finished':
-            progress_data[self.task_id]["progress"] = 80
-            progress_data[self.task_id]["message"] = "下載完成，準備進行最終處理..."
+            set_progress(self.task_id, progress=80, message="下載完成，準備進行最終處理...")
         elif d['status'] == 'error':
-            progress_data[self.task_id]["status"] = "error"
-            progress_data[self.task_id]["message"] = "下載過程中發生錯誤"
+            set_progress(self.task_id, status="error", message="下載過程中發生錯誤")
 
 def ffmpeg_progress_hook(task_id):
-    if task_id in progress_data and progress_data[task_id].get("status") != "completed":
-        current_progress = progress_data[task_id].get("progress", 80)
+    progress = get_task_progress(task_id)
+    if progress and progress.get("status") != "completed":
+        current_progress = progress.get("progress", 80)
         if current_progress < 99:
-            progress_data[task_id]["progress"] = min(current_progress + 0.1, 99)
-            progress_data[task_id]["message"] = "影片轉檔中，這可能需要幾分鐘..."
+            set_progress(task_id, progress=min(current_progress + 0.1, 99), message="影片轉檔中，這可能需要幾分鐘...")
 
 class InfoRequest(BaseModel):
     url: str
@@ -68,18 +157,6 @@ class DownloadRequest(BaseModel):
 class ProgressRequest(BaseModel):
     task_id: str
 
-def cleanup_file(path: str):
-    try:
-        base_name = os.path.splitext(path)[0]
-        pattern = f"{glob.escape(base_name)}.*"
-        temp_files = glob.glob(pattern)
-        for temp_file in temp_files:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-                print(f"🗑️ 已成功掃除暫存檔：{temp_file}")
-    except Exception as e:
-        print(f"⚠️ 刪除暫存檔失敗：{e}")
-
 def clean_youtube_url(url: str) -> str:
     parsed_url = urllib.parse.urlparse(url)
     query_params = urllib.parse.parse_qs(parsed_url.query)
@@ -92,7 +169,9 @@ def clean_youtube_url(url: str) -> str:
 async def get_video_info(request: InfoRequest):
     try:
         clean_url = clean_youtube_url(request.url)
-        ydl_opts = {'skip_download': True, 'noplaylist': True, 'ffmpeg_location': FFMPEG_PATH, 'extract_flat': 'in_playlist'}
+        ydl_opts = {'skip_download': True, 'noplaylist': True, 'extract_flat': 'in_playlist'}
+        if FFMPEG_PATH:
+            ydl_opts['ffmpeg_location'] = FFMPEG_PATH
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
         if info.get('_type') == 'playlist':
@@ -133,11 +212,14 @@ async def get_video_info(request: InfoRequest):
             })
         return {"title": info.get('title', '未知影片'), "options": sorted(options, key=lambda x: int(x['resolution'].replace('p', '').replace('4K', '2160')), reverse=True)}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"解析影片失敗: {str(e)}")
+        raise HTTPException(status_code=400, detail=friendly_error_message(e))
 
 @app.post("/api/download")
 async def start_download_task(request: DownloadRequest, background_tasks: BackgroundTasks):
+    cleanup_old_tasks()
     task_id = str(uuid.uuid4())
+    set_progress(task_id, status="queued", progress=0, message="等待下載任務啟動...")
     background_tasks.add_task(run_download, request, task_id)
     return {"success": True, "task_id": task_id}
 
@@ -146,20 +228,19 @@ def run_download(request: DownloadRequest, task_id: str):
         clean_url = clean_youtube_url(request.url)
         progress_hook = ProgressHook(task_id)
 
-        # ✅ 修正一：直接指定下載到 Downloads 資料夾，避免寫入唯讀的 _MEIPASS
-        downloads_dir = os.path.join(os.path.expanduser('~'), 'Downloads')
-        os.makedirs(downloads_dir, exist_ok=True)
+        downloads_dir = get_downloads_dir()
 
         ydl_opts = {
             'format': request.format_id,
-            'ffmpeg_location': FFMPEG_PATH,
             'merge_output_format': 'mp4',
-            # ✅ 修正二：outtmpl 加上完整路徑
-            'outtmpl': os.path.join(downloads_dir, f'{task_id}_%(title)s.%(ext)s'),
+            'outtmpl': os.path.join(downloads_dir, f'{task_id}_%(title).180B.%(ext)s'),
+            'restrictfilenames': platform.system() == "Windows",
             'noplaylist': True,
             'keepvideo': False,
             'progress_hooks': [progress_hook],
         }
+        if FFMPEG_PATH:
+            ydl_opts['ffmpeg_location'] = FFMPEG_PATH
 
         if request.type == "audio":
             ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
@@ -167,8 +248,8 @@ def run_download(request: DownloadRequest, task_id: str):
         else:
             ydl_opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
             if "1440" in request.resolution or "4K" in request.resolution or "2160" in request.resolution:
-                print(f"🚀 偵測到 {request.resolution} 超高畫質！啟動 H.264 強制轉檔模式...")
-                ydl_opts['postprocessor_args'] = ['-vcodec', 'libx264', '-preset', 'fast', '-crf', '23']
+                print(f"🚀 偵測到 {request.resolution} 超高畫質！啟動 H.264 轉檔模式...")
+                ydl_opts['postprocessor_args'] = get_h264_transcode_args(request.resolution)
                 ydl_opts['postprocessor_hooks'] = [lambda d: ffmpeg_progress_hook(task_id)]
             target_ext = ".mp4"
 
@@ -177,8 +258,7 @@ def run_download(request: DownloadRequest, task_id: str):
             filename = ydl.prepare_filename(info)
             filename = os.path.splitext(filename)[0] + target_ext
 
-        # ✅ 修正三：檔案已在 Downloads，只需重新命名去掉 task_id 前綴
-        final_filename = os.path.basename(filename).replace(f'{task_id}_', '')
+        final_filename = sanitize_filename(os.path.basename(filename).replace(f'{task_id}_', ''))
         final_path = os.path.join(downloads_dir, final_filename)
 
         counter = 1
@@ -187,18 +267,19 @@ def run_download(request: DownloadRequest, task_id: str):
             final_path = os.path.join(downloads_dir, f"{base_name} ({counter}){ext}")
             counter += 1
 
-        os.rename(filename, final_path)
+        os.replace(filename, final_path)
         print(f"✅ 檔案已儲存至: {final_path}")
 
-        progress_data[task_id] = {"status": "completed", "progress": 100, "message": "下載完成！"}
+        set_progress(task_id, status="completed", progress=100, message="下載完成！")
 
     except Exception as e:
         print(f"下載任務 {task_id} 失敗: {str(e)}")
-        progress_data[task_id] = {"status": "error", "message": str(e)}
+        set_progress(task_id, status="error", message=friendly_error_message(e))
 
 @app.post("/api/progress")
 async def get_progress(request: ProgressRequest):
-    progress = progress_data.get(request.task_id, {"status": "not_found", "message": "找不到任務"})
+    cleanup_old_tasks()
+    progress = get_task_progress(request.task_id) or {"status": "not_found", "message": "找不到任務"}
     return JSONResponse(content=progress)
 
 def get_frontend_dir():

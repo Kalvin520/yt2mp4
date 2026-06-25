@@ -71,7 +71,7 @@ source venv/bin/activate  # macOS / Linux
 # venv\Scripts\activate   # Windows
 
 # 安裝必備的 Python 套件
-pip install fastapi uvicorn yt-dlp pydantic pywebview
+pip install -r requirements.txt
 
 # 啟動開發伺服器 (網頁模式)
 uvicorn main:app --reload
@@ -79,7 +79,7 @@ uvicorn main:app --reload
 # 或啟動桌面應用程式模式 (會開啟獨立視窗)
 python desktop.py
 ```
-> 💡 **開發提示**: 開發期間，你可以同時啟動前端的 `npm run dev` 與後端的 `uvicorn main:app --reload`，並將前端 API 請求導向後端的 `http://127.0.0.1:8000` 進行前後端分離測試。
+> 💡 **開發提示**: 開發期間，你可以同時啟動前端的 `npm run dev` 與後端的 `uvicorn main:app --reload`。Vite 已設定 `/api` proxy，預設會將前端 API 請求導向 `http://127.0.0.1:8000`。如果後端跑在其他位置，可設定 `VITE_API_BASE_URL` 覆蓋。
 
 ---
 
@@ -105,8 +105,15 @@ pip install pyinstaller
 ```
 
 #### 🍎 macOS 打包指南
-專案中已經提供了 `YT2MP4.spec` 檔案。
-*(⚠️ 注意：該 `.spec` 檔案中目前指定了 `ffmpeg` 的 Homebrew 路徑 `/opt/homebrew/bin/ffmpeg`。如果你的 `ffmpeg` 安裝路徑不同，請在執行打包前先修改 `YT2MP4.spec` 檔內的 `binaries` 參數。)*
+專案中已經提供了 `YT2MP4.spec` 檔案。打包時會依序尋找：
+- 環境變數 `FFMPEG_BINARY`
+- 系統 `PATH` 內的 `ffmpeg`
+- Homebrew 常見路徑 `/opt/homebrew/bin/ffmpeg`、`/usr/local/bin/ffmpeg`
+
+如果你想指定 FFmpeg，可以在打包前設定：
+```bash
+export FFMPEG_BINARY=/opt/homebrew/bin/ffmpeg
+```
 
 執行打包指令：
 ```bash
@@ -114,13 +121,24 @@ pyinstaller YT2MP4.spec
 ```
 打包完成後，你可以在 `dist/` 資料夾下找到編譯完成的 `YT2MP4.app` 應用程式。
 
-#### 🪟 Windows 打包指南
-Windows 平台可以參考以下指令進行打包，無需使用 Mac 專用的 `.spec` 檔。若要打包成單一資料夾或單一執行檔，可以使用 `--add-data` 把前端的 `dist` 目錄包進去：
+#### 🪟 Windows 10/11 打包指南
+Windows 平台使用 `YT2MP4-windows.spec`。打包時會依序尋找：
+- 環境變數 `FFMPEG_BINARY`
+- 系統 `PATH` 內的 `ffmpeg.exe` 或 `ffmpeg`
+- 專案內的 `bin/ffmpeg.exe`
 
-```bash
-pyinstaller --noconfirm --onedir --windowed --add-data "frontend/dist;frontend/dist" desktop.py
+建議做法是下載 Windows 版 FFmpeg，將 `ffmpeg.exe` 放到專案的 `bin/` 資料夾，或設定：
+
+```powershell
+$env:FFMPEG_BINARY="C:\ffmpeg\bin\ffmpeg.exe"
 ```
-*(💡 提示：若要在 Windows 上免安裝 FFmpeg 即可運行，建議將下載好的 `ffmpeg.exe` 一併用 `--add-binary` 參數打包進去，並在 `main.py` 的 `get_ffmpeg_path` 函式中做好對應的 Windows 路徑處理。)*
+
+執行打包指令：
+```powershell
+pyinstaller YT2MP4-windows.spec
+```
+
+打包完成後，你可以在 `dist/` 資料夾下找到編譯完成的 `YT2MP4.exe`。
 
 ---
 
@@ -134,6 +152,8 @@ YT2MP4/
 ├── main.py               # FastAPI 後端核心邏輯 (API 處理、yt-dlp 下載、進度回報)
 ├── desktop.py            # PyWebView 桌面視窗啟動入口 (內嵌 Uvicorn)
 ├── YT2MP4.spec           # macOS 的 PyInstaller 打包設定檔
+├── YT2MP4-windows.spec   # Windows 的 PyInstaller 打包設定檔
+├── requirements.txt      # Python 依賴清單
 └── README.md             # 本說明文件
 ```
 

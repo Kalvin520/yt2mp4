@@ -3,6 +3,13 @@
 *.mp3
 __pycache__/
 .DS_Store
-YT2MP4.spec
+.idea/
+.env
+.env.*
 build/
 dist/
+node_modules/
+venv/
+.venv/
+*.pyc
+bin/ffmpeg*
