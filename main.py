@@ -95,6 +95,27 @@ def get_h264_transcode_args(resolution: str) -> list[str]:
 
     return ["-vcodec", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "192k"]
 
+def get_aac_audio_args() -> list[str]:
+    return ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
+
+def is_aac_compatible_audio(audio_format: dict) -> bool:
+    ext = (audio_format.get("ext") or "").lower()
+    acodec = (audio_format.get("acodec") or "").lower()
+    return ext in {"m4a", "mp4"} or acodec.startswith(("mp4a", "aac"))
+
+def audio_quality_score(audio_format: dict) -> tuple[float, int]:
+    bitrate = audio_format.get("abr") or audio_format.get("tbr") or 0
+    filesize = audio_format.get("filesize") or audio_format.get("filesize_approx") or 0
+    return float(bitrate or 0), int(filesize or 0)
+
+def select_best_audio_format(audio_formats: list[dict]):
+    if not audio_formats:
+        return None
+
+    compatible_formats = [f for f in audio_formats if is_aac_compatible_audio(f)]
+    candidates = compatible_formats or audio_formats
+    return max(candidates, key=audio_quality_score)
+
 def friendly_error_message(error: Exception) -> str:
     message = str(error)
     lowered = message.lower()
@@ -184,7 +205,7 @@ async def get_video_info(request: InfoRequest):
         if info.get('_type') == 'playlist':
             raise ValueError("伺服器不支援下載整個播放清單，請提供單一影片的網址喔！")
         audio_formats = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-        best_audio = audio_formats[-1] if audio_formats else None
+        best_audio = select_best_audio_format(audio_formats)
         audio_size = best_audio.get('filesize') or best_audio.get('filesize_approx') or 0 if best_audio else 0
         audio_id = best_audio['format_id'] if best_audio else 'bestaudio'
         target_resolutions = [480, 720, 1080, 1440, 2160]
@@ -256,8 +277,11 @@ def run_download(request: DownloadRequest, task_id: str):
             ydl_opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
             if "1440" in request.resolution or "4K" in request.resolution or "2160" in request.resolution:
                 safe_print(f"偵測到 {request.resolution} 超高畫質，啟動 H.264 轉檔模式...")
-                ydl_opts['postprocessor_args'] = get_h264_transcode_args(request.resolution)
-                ydl_opts['postprocessor_hooks'] = [lambda d: ffmpeg_progress_hook(task_id)]
+                video_args = get_h264_transcode_args(request.resolution)
+            else:
+                video_args = get_aac_audio_args()
+            ydl_opts['postprocessor_args'] = {'ffmpegvideoconvertor+ffmpeg_o': video_args}
+            ydl_opts['postprocessor_hooks'] = [lambda d: ffmpeg_progress_hook(task_id)]
             target_ext = ".mp4"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
