@@ -17,6 +17,13 @@ TASK_TTL_SECONDS = 60 * 30
 progress_lock = threading.Lock()
 progress_data = {}
 
+def safe_print(message: str):
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(message.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+
 def get_ffmpeg_path():
     bundled_dir = getattr(sys, '_MEIPASS', None)
     if getattr(sys, 'frozen', False):
@@ -212,7 +219,7 @@ async def get_video_info(request: InfoRequest):
             })
         return {"title": info.get('title', '未知影片'), "options": sorted(options, key=lambda x: int(x['resolution'].replace('p', '').replace('4K', '2160')), reverse=True)}
     except Exception as e:
-        print(f"解析影片失敗: {str(e)}")
+        safe_print(f"解析影片失敗: {str(e)}")
         raise HTTPException(status_code=400, detail=friendly_error_message(e))
 
 @app.post("/api/download")
@@ -248,7 +255,7 @@ def run_download(request: DownloadRequest, task_id: str):
         else:
             ydl_opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
             if "1440" in request.resolution or "4K" in request.resolution or "2160" in request.resolution:
-                print(f"🚀 偵測到 {request.resolution} 超高畫質！啟動 H.264 轉檔模式...")
+                safe_print(f"偵測到 {request.resolution} 超高畫質，啟動 H.264 轉檔模式...")
                 ydl_opts['postprocessor_args'] = get_h264_transcode_args(request.resolution)
                 ydl_opts['postprocessor_hooks'] = [lambda d: ffmpeg_progress_hook(task_id)]
             target_ext = ".mp4"
@@ -268,12 +275,12 @@ def run_download(request: DownloadRequest, task_id: str):
             counter += 1
 
         os.replace(filename, final_path)
-        print(f"✅ 檔案已儲存至: {final_path}")
+        safe_print(f"檔案已儲存至: {final_path}")
 
         set_progress(task_id, status="completed", progress=100, message="下載完成！")
 
     except Exception as e:
-        print(f"下載任務 {task_id} 失敗: {str(e)}")
+        safe_print(f"下載任務 {task_id} 失敗: {str(e)}")
         set_progress(task_id, status="error", message=friendly_error_message(e))
 
 @app.post("/api/progress")

@@ -1,10 +1,18 @@
 import threading
+import sys
 import uvicorn
 import webview
 import socket
 from main import app  # 引入我們寫好的 FastAPI App
 
 server = None
+
+def safe_print(message: str):
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(message.encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 def find_free_port():
     """自動找尋一個系統上沒人用的 Port"""
@@ -29,7 +37,7 @@ class Api:
 
 def on_closed():
     """當使用者關閉視窗時觸發：通知背景伺服器結束"""
-    print("視窗已關閉，正在結束程式...")
+    safe_print("視窗已關閉，正在結束程式...")
     if server:
         server.should_exit = True
 
@@ -37,7 +45,7 @@ if __name__ == '__main__':
     # 1. 取得可用 Port
     port = find_free_port()
     url = f"http://127.0.0.1:{port}"
-    print(f"後端伺服器啟動於: {url}")
+    safe_print(f"後端伺服器啟動於: {url}")
 
     # 2. 啟動背景伺服器執行緒
     server_thread = threading.Thread(target=run_server, args=(port,), daemon=True)
